@@ -1,0 +1,29 @@
+{
+	"tcp_port": 2000,
+	"distinct_id": true,
+    "output_format": "NMEA0183",
+	"sensors": [
+		{
+			"mac": "CE:16:58:AA:EB:B3",
+			"id": "RU3",
+			"location": "Inside",
+			"polling_frequency": 1,
+			"calibration": {
+				"temperature": 1.82,
+				"humidity": 0.0,
+				"pressure": 0.0
+			}
+		},
+		{
+			"mac": "FE:06:D5:7C:AE:3F",
+			"id": "RU1",
+			"location": "Outside",
+			"polling_frequency": 2,
+			"calibration": {
+				"temperature": 0.73,
+				"humidity": -30.0,
+				"pressure": 0.0
+			}
+		}
+	]
+}
