@@ -116,8 +116,8 @@ class NMEAFormatter:
             
             # Format humidity according to output format
             if output_format == "ESP32NMEA2K":
-                # ESP32NMEA2K: Use G for generic sensor type, humidity as integer (0 decimal places)
-                hum_str = f"$GPXDR,G,{int(humidity)},P,{hum_id}"
+                # ESP32NMEA2K: Use G for generic sensor type, humidity with 1 decimal place
+                hum_str = f"$GPXDR,G,{humidity:.1f},P,{hum_id}"
             else:
                 # NMEA0183: Humidity with 1 decimal place
                 hum_str = f"$GPXDR,H,{humidity:.1f},P,{hum_id}"
