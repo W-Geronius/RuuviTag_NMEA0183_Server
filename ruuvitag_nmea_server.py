@@ -454,8 +454,18 @@ def main():
     
     # Set logging level based on arguments
     if args.quiet:
-        logging.getLogger().setLevel(logging.CRITICAL + 1)  # Higher than CRITICAL to suppress all
+        # Suppress all logging, including file logging
+        logging.getLogger().setLevel(logging.CRITICAL + 1)  # Root logger
         ruuvitag_sensor.log.enable_console(level=logging.CRITICAL + 1)
+        
+        # Explicitly suppress ruuvitag_sensor.ruuvi logger (handles file logging)
+        logging.getLogger("ruuvitag_sensor.ruuvi").setLevel(logging.CRITICAL + 1)
+        logging.getLogger("ruuvitag_sensor").setLevel(logging.CRITICAL + 1)
+        
+        # Disable any existing file handlers
+        for handler in logging.root.handlers[:]:
+            if isinstance(handler, logging.FileHandler):
+                logging.root.removeHandler(handler)
     elif args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
         ruuvitag_sensor.log.enable_console(level=logging.DEBUG)
