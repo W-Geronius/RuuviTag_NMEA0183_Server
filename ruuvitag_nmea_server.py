@@ -448,10 +448,15 @@ def main():
                         help=f"Configuration file path (default: {DEFAULT_CONFIG_FILE})")
     parser.add_argument("--debug", action="store_true",
                         help="Enable debug logging")
+    parser.add_argument("--quiet", action="store_true",
+                        help="Suppress all logging output")
     args = parser.parse_args()
     
-    # Set debug logging if requested
-    if args.debug:
+    # Set logging level based on arguments
+    if args.quiet:
+        logging.getLogger().setLevel(logging.CRITICAL + 1)  # Higher than CRITICAL to suppress all
+        ruuvitag_sensor.log.enable_console(level=logging.CRITICAL + 1)
+    elif args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
         ruuvitag_sensor.log.enable_console(level=logging.DEBUG)
     
