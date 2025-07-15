@@ -2,8 +2,8 @@
 """
 RuuviTag NMEA0183/ESP32NMEA2K TCP Server
 
-This script creates a TCP server that sends RuuviTag sensor data as NMEA sentences.
-It reads configuration from a config.json file, including TCP port, sensor MACs, polling frequency,
+This script creates a TCP server to provide RuuviTag temperature sensor data and dewpoint as NMEA sentences.
+ It reads configuration from a config.json file, including TCP port, sensor MACs, polling frequency,
 sensor IDs, locations, calibration factors, and output format.
 
 Features:
@@ -16,7 +16,7 @@ Features:
 - Calibration factors for temperature, humidity, and pressure
 
 Usage:
-    python ruuvitag_nmea_server.py [--config CONFIG_FILE] [--debug]
+    python ruuvitag_nmea_server.py [--config CONFIG_FILE] [--log-level {quiet,error,warning,info,debug}]
 """
 
 import argparse
@@ -27,8 +27,11 @@ import signal
 import socket
 import sys
 import time
+import math
+import os
 from datetime import datetime, timezone
 from typing import Dict, List
+from logging.handlers import RotatingFileHandler
 
 from ruuvitag_sensor.ruuvi import RuuviTagSensor
 from ruuvitag_sensor.ruuvi_types import SensorData
@@ -58,6 +61,32 @@ class NMEAFormatter:
         return f"{checksum:02X}"
     
     @staticmethod
+    def calculate_dewpoint(temp_c: float, humidity: float) -> float:
+        """
+        Calculate dewpoint temperature using Magnus-Tetens formula
+        
+        Args:
+            temp_c: Temperature in Celsius
+            humidity: Relative humidity as percentage (0-100)
+            
+        Returns:
+            Dewpoint temperature in Celsius
+        """
+        # Constants for Magnus-Tetens approximation
+        a = 17.27
+        b = 237.7
+        
+        # Calculate alpha term in Magnus-Tetens formula
+        # Ensure humidity is within valid range to prevent math domain errors
+        humidity = max(0.1, min(100, humidity))
+        alpha = ((a * temp_c) / (b + temp_c)) + math.log(humidity / 100.0)
+        
+        # Calculate dewpoint
+        dewpoint = (b * alpha) / (a - alpha)
+        
+        return dewpoint
+    
+    @staticmethod
     def format_xdr(sensor_data: SensorData, sensor_id: str, 
                    calibration: Dict[str, float], distinct_id: bool = False,
                    output_format: str = "NMEA0183") -> List[str]:
@@ -75,6 +104,10 @@ class NMEAFormatter:
             List of NMEA XDR sentences
         """
         sentences = []
+        
+        # Get calibrated temperature and humidity for dewpoint calculation
+        temp_c = None
+        humidity = None
         
         # Temperature (applying calibration)
         if "temperature" in sensor_data:
@@ -125,6 +158,26 @@ class NMEAFormatter:
             checksum = NMEAFormatter.calculate_checksum(hum_str[1:])
             sentences.append(f"{hum_str}*{checksum}")
         
+        # Calculate and format dewpoint if we have both temperature and humidity
+        if temp_c is not None and humidity is not None:
+            # Calculate dewpoint using calibrated values
+            dewpoint_c = NMEAFormatter.calculate_dewpoint(temp_c, humidity)
+            
+            # Use distinct ID if requested
+            dewpoint_id = f"{sensor_id}D" if distinct_id else sensor_id
+            
+            # Format dewpoint according to output format
+            if output_format == "ESP32NMEA2K":
+                # ESP32NMEA2K: Use G for generic sensor type, dewpoint in Celsius with 1 decimal place
+                dewpoint_str = f"$GPXDR,G,{dewpoint_c:.1f},C,{dewpoint_id}"
+            else:
+                # NMEA0183: Dewpoint in Kelvin with 2 decimal places (same format as temperature)
+                dewpoint_k = dewpoint_c + 273.15
+                dewpoint_str = f"$GPXDR,C,{dewpoint_k:.2f},K,{dewpoint_id}"
+                
+            checksum = NMEAFormatter.calculate_checksum(dewpoint_str[1:])
+            sentences.append(f"{dewpoint_str}*{checksum}")
+        
         # Pressure (applying calibration)
         if "pressure" in sensor_data:
             raw_pressure = sensor_data["pressure"]
@@ -169,12 +222,12 @@ class TCPServer:
     
     async def handle_client(self, reader, writer):
         """Handle a client connection"""
-        addr = writer.get_extra_info('peername')
-        logger.info(f'New client connected: {addr}')
-        
-        self.clients.append(writer)
-        
         try:
+            addr = writer.get_extra_info('peername')
+            logger.info(f'New client connected: {addr}')
+            
+            self.clients.append(writer)
+            
             # Keep connection open and wait for client to disconnect
             while self.running:
                 try:
@@ -186,6 +239,10 @@ class TCPServer:
                     continue
         except ConnectionResetError:
             pass
+        except ConnectionError as e:
+            logger.error(f"Connection error: {e}")
+        except Exception as e:
+            logger.error(f"Error handling client: {e}")
         finally:
             writer.close()
             await writer.wait_closed()
@@ -245,7 +302,7 @@ class RuuviTagNMEAServer:
                             
             # Validate config
             if "tcp_port" not in self.config:
-                self.config["tcp_port"] = 2000
+                self.config["tcp_port"] = 10110
                 
             # Default polling frequency if not specified at the sensor level
             if "polling_frequency" not in self.config:
@@ -255,7 +312,7 @@ class RuuviTagNMEAServer:
             if "output_format" not in self.config:
                 self.config["output_format"] = "NMEA0183"
             elif self.config["output_format"] not in ["NMEA0183", "ESP32NMEA2K"]:
-                logger.warning(f"Unknown output format '{self.config['output_format']}', using NMEA0183")
+                logger.error(f"Unknown output format '{self.config['output_format']}', using NMEA0183")
                 self.config["output_format"] = "NMEA0183"
             
             # Add distinct_id default if not present
@@ -373,7 +430,7 @@ class RuuviTagNMEAServer:
                                        f"Humidity: {data[mac].get('humidity')}%, "
                                        f"Pressure: {data[mac].get('pressure')} hPa")
                         else:
-                            logger.warning(f"No data received for sensor {sensor['id']} ({mac})")
+                            logger.error(f"No data received for sensor {sensor['id']} ({mac})")
                 else:
                     logger.warning("No sensors due for polling")
             
@@ -441,35 +498,98 @@ class RuuviTagNMEAServer:
         
         logger.info("Server shutdown complete")
 
+class LoggerWriter:
+    """Helper class to redirect stdout/stderr to logger"""
+    def __init__(self, level):
+        self.level = level
+        self.logger = logging.getLogger("stdout_stderr")
+        
+    def write(self, message):
+        if message and not message.isspace():
+            self.logger.log(self.level, message)
+            
+    def flush(self):
+        pass
+
 def main():
     """Main entry point"""
     parser = argparse.ArgumentParser(description="RuuviTag NMEA TCP Server")
     parser.add_argument("--config", default=DEFAULT_CONFIG_FILE,
                         help=f"Configuration file path (default: {DEFAULT_CONFIG_FILE})")
-    parser.add_argument("--debug", action="store_true",
-                        help="Enable debug logging")
-    parser.add_argument("--quiet", action="store_true",
-                        help="Suppress all logging output")
+    parser.add_argument("--log-level", choices=["quiet", "error", "warning", "info", "debug"], 
+                        default="info", help="Set logging level - debug shows library details (default: info)")
+    parser.add_argument("--log-file", help="Log file path (if not specified, logs to console only)")
     args = parser.parse_args()
     
-    # Set logging level based on arguments
-    if args.quiet:
-        # Suppress all logging, including file logging
-        logging.getLogger().setLevel(logging.CRITICAL + 1)  # Root logger
-        ruuvitag_sensor.log.enable_console(level=logging.CRITICAL + 1)
-        
-        # Explicitly suppress ruuvitag_sensor.ruuvi logger (handles file logging)
-        logging.getLogger("ruuvitag_sensor.ruuvi").setLevel(logging.CRITICAL + 1)
-        logging.getLogger("ruuvitag_sensor").setLevel(logging.CRITICAL + 1)
-        
-        # Disable any existing file handlers
-        for handler in logging.root.handlers[:]:
-            if isinstance(handler, logging.FileHandler):
-                logging.root.removeHandler(handler)
-    elif args.debug:
-        logging.getLogger().setLevel(logging.DEBUG)
-        ruuvitag_sensor.log.enable_console(level=logging.DEBUG)
+    # Map string log levels to logging module levels
+    log_level_map = {
+        "quiet": logging.CRITICAL + 1,
+        "error": logging.ERROR,
+        "warning": logging.WARNING,
+        "info": logging.INFO,
+        "debug": logging.DEBUG
+    }
     
+    # Get the log level from arguments
+    log_level = log_level_map[args.log_level]
+    
+    # Configure root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(log_level)
+    
+    # Clear existing handlers
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+    
+    # Create formatter
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    
+    # Create console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(formatter)
+    root_logger.addHandler(console_handler)
+    
+    # Add file handler if log file is specified
+    if args.log_file:
+        try:
+            # Create log directory if it doesn't exist
+            log_dir = os.path.dirname(args.log_file)
+            if log_dir and not os.path.exists(log_dir):
+                os.makedirs(log_dir)
+                
+            # Set up rotating file handler (10MB max, keep 3 backups)
+            file_handler = RotatingFileHandler(
+                args.log_file, maxBytes=10*1024*1024, backupCount=3)
+            file_handler.setFormatter(formatter)
+            root_logger.addHandler(file_handler)
+            
+            # Configure ruuvitag_sensor logging - need to set level for all loggers
+            ruuvitag_sensor.log.enable_console(level=log_level)
+
+            # Explicitly set level for all ruuvitag loggers
+            logging.getLogger("ruuvitag_sensor").setLevel(log_level)
+            logging.getLogger("ruuvitag_sensor.ruuvi").setLevel(log_level)
+            logging.getLogger("ruuvitag_sensor.log").setLevel(log_level)
+
+            # Also check for and remove any file handlers the library might have added
+            for logger_name in ["ruuvitag_sensor", "ruuvitag_sensor.ruuvi", "ruuvitag_sensor.log"]:
+                lib_logger = logging.getLogger(logger_name)
+                for handler in lib_logger.handlers[:]:
+                    if isinstance(handler, logging.FileHandler):
+                        lib_logger.removeHandler(handler)
+
+            # Redirect stdout and stderr to the log file as well
+            # This ensures all print statements and error messages go to the log
+            sys.stdout = LoggerWriter(logging.INFO)
+            sys.stderr = LoggerWriter(logging.ERROR)
+            
+            logger.info(f"Logging to file: {args.log_file}")
+        except Exception as e:
+            logger.error(f"Failed to set up file logging: {e}")
+    
+    # Configure ruuvitag_sensor logging
+    ruuvitag_sensor.log.enable_console(level=log_level)
+
     # Create server instance
     server = RuuviTagNMEAServer(args.config)
     
