@@ -8,12 +8,12 @@ sensor IDs, locations, calibration factors, and output format.
 
 Features:
 - Configurable TCP port
-- Individual polling frequencies for each sensor
+- Individual polling frequencies and calibration factors for each sensor
 - Multiple output formats, set output_format in config.json
   - NMEA0183: Temperature in Kelvin, pressure in bar
-  - ESP32NMEA2K: Temperature in Celsius, pressure in hPa
+  - ESP32NMEA2K: Temperature in Celsius, pressure in hPa, distinct IDs for each measurement type
 - Option to use distinct IDs for different measurement types, set distinct_id in config.json
-- Calibration factors for temperature, humidity, and pressure
+- Raspberry Bluetooth error handling (watch out: using sudo!)
 
 Usage:
     python ruuvitag_nmea_server.py [--config CONFIG_FILE] [--log-level {quiet,error,warning,info,debug}]
@@ -29,7 +29,8 @@ import sys
 import time
 import math
 import os
-from datetime import datetime, timezone
+import subprocess
+from datetime import datetime, timedelta
 from typing import Dict, List
 from logging.handlers import RotatingFileHandler
 
@@ -53,7 +54,7 @@ class NMEAFormatter:
     
     @staticmethod
     def calculate_checksum(sentence: str) -> str:
-        """Calculate the checksum for an NMEA sentence"""
+        """Calculate checksum for a NMEA sentence"""
         # The checksum is calculated as the XOR of all characters between $ and *
         checksum = 0
         for char in sentence:
@@ -62,28 +63,12 @@ class NMEAFormatter:
     
     @staticmethod
     def calculate_dewpoint(temp_c: float, humidity: float) -> float:
-        """
-        Calculate dewpoint temperature using Magnus-Tetens formula
-        
-        Args:
-            temp_c: Temperature in Celsius
-            humidity: Relative humidity as percentage (0-100)
-            
-        Returns:
-            Dewpoint temperature in Celsius
-        """
-        # Constants for Magnus-Tetens approximation
+        """Calculate dewpoint temperature using Magnus-Tetens formula"""
         a = 17.27
-        b = 237.7
-        
-        # Calculate alpha term in Magnus-Tetens formula
-        # Ensure humidity is within valid range to prevent math domain errors
+        b = 237.7       
         humidity = max(0.1, min(100, humidity))
-        alpha = ((a * temp_c) / (b + temp_c)) + math.log(humidity / 100.0)
-        
-        # Calculate dewpoint
-        dewpoint = (b * alpha) / (a - alpha)
-        
+        alpha = ((a * temp_c) / (b + temp_c)) + math.log(humidity / 100.0)       
+        dewpoint = (b * alpha) / (a - alpha)        
         return dewpoint
     
     @staticmethod
@@ -292,8 +277,13 @@ class RuuviTagNMEAServer:
         self.config = None
         self.tcp_server = None
         self.running = True
-        self.sensor_next_poll = {}  # Track when each sensor should be polled next
-    
+        self.sensor_next_poll = {}
+        # BT error handling variables
+        self.bt_error_count = 0
+        self.last_bt_reset = datetime.now()
+        self.max_bt_errors = 3
+        self.bt_reset_cooldown = timedelta(minutes=5)
+
     def load_config(self):
         """Load configuration from JSON file"""
         try:
@@ -358,6 +348,32 @@ class RuuviTagNMEAServer:
             logger.error(f"Error loading config: {e}")
             return False
         
+    async def reset_bluetooth_adapter(self):
+        """Reset the Bluetooth adapter when scanner gets stuck"""
+        try:
+            logger.warning("Resetting Bluetooth adapter due to scanner errors")
+            
+            # Only attempt hardware reset if we're on Linux/Raspberry Pi
+            if sys.platform.startswith('linux'):
+                # Run hciconfig commands to reset adapter
+                subprocess.run(["sudo", "hciconfig", "hci0", "down"], check=False)
+                await asyncio.sleep(1)
+                subprocess.run(["sudo", "hciconfig", "hci0", "up"], check=False)
+                await asyncio.sleep(2)
+                
+                # Restart Bluetooth service if we continue having issues
+                if self.bt_error_count >= self.max_bt_errors:
+                    logger.warning("Multiple Bluetooth errors detected, restarting bluetooth service")
+                    subprocess.run(["sudo", "systemctl", "restart", "bluetooth"], check=False)
+                    await asyncio.sleep(5)  # Give the service time to restart
+                    self.bt_error_count = 0  # Reset error count after service restart
+            
+            self.last_bt_reset = datetime.now()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to reset Bluetooth adapter: {e}")
+            return False
+
     async def poll_sensors(self):
         """Poll RuuviTag sensors and send data as NMEA sentences"""
         
@@ -373,7 +389,6 @@ class RuuviTagNMEAServer:
                 for sensor in self.config["sensors"]:
                     mac = sensor["mac"]
                     next_poll_time = self.sensor_next_poll.get(mac, 0)
-                    
                     
                     if current_time >= next_poll_time:
                         sensors_to_poll.append(sensor)
@@ -400,6 +415,8 @@ class RuuviTagNMEAServer:
                         macs=macs_to_poll, 
                         search_duration_sec=search_duration
                     )
+                    
+                    self.bt_error_count = 0
                                         
                     # Process each sensor's data
                     for sensor in sensors_to_poll:
@@ -557,7 +574,7 @@ def main():
             if log_dir and not os.path.exists(log_dir):
                 os.makedirs(log_dir)
                 
-            # Set up rotating file handler (10MB max, keep 3 backups)
+            # Set up rotating log file handler (10MB max, keep 3 backups)
             file_handler = RotatingFileHandler(
                 args.log_file, maxBytes=10*1024*1024, backupCount=3)
             file_handler.setFormatter(formatter)
@@ -592,11 +609,7 @@ def main():
 
     # Create server instance
     server = RuuviTagNMEAServer(args.config)
-    
-    # Set Windows-specific event loop policy if needed
-    if sys.platform == 'win32':
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    
+        
     # Use a separate function to run the server with proper interrupt handling
     def run_with_interrupt_handling():
         loop = asyncio.new_event_loop()
