@@ -32,9 +32,11 @@ The server supports two output formats:
 
 ### Standard Installation
 
-1. Ensure you have the ruuvitag-sensor library installed:
+1. Setup Virtual environment and ensure you have the ruuvitag-sensor library installed:
 
 ```bash
+python3 -m venv env
+source env/bin/activate
 pip install ruuvitag-sensor
 ```
 
