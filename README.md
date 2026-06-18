@@ -16,11 +16,11 @@ The server supports two output formats:
 
 ## Features
 
-- ⏱️ Individual polling frequencies for each sensor
-- 🔄 Multiple output formats (NMEA0183 or ESP32NMEA2K)
-- 🔍 Option to use distinct transducer IDs for different sensor types
-- 📊 Calibration offsets for temperature, humidity, and pressure
-- 💧 Dewpoint calculated from temperature and humidity
+- Individual polling frequencies for each sensor
+- Multiple output formats (NMEA0183 or ESP32NMEA2K)
+- Option to use distinct transducer IDs for different sensor types
+- Calibration offsets for temperature, humidity, and pressure
+- Dewpoint calculated from temperature and humidity
 
 ## Prerequisites
 
