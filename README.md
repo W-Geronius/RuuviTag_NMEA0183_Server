@@ -43,8 +43,8 @@ pip install ruuvitag-sensor
 2. download the python script and sample config file:
 
 ```bash
-wget https://github.com/W-Geronius/RuuviTag_NMEA0183_Server/blob/master/ruuvitag_nmea_server.py
-wget https://github.com/W-Geronius/RuuviTag_NMEA0183_Server/blob/master/config.json
+wget https://raw.githubusercontent.com/W-Geronius/RuuviTag_NMEA0183_Server/master/ruuvitag_nmea_server.py
+wget https://raw.githubusercontent.com/W-Geronius/RuuviTag_NMEA0183_Server/master/config.json
 ```
 
 3. Create or modify config.json file in the same directory as the script with your RuuviTag information. Here's an example:
